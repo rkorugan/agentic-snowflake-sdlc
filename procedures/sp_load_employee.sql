@@ -4,7 +4,8 @@
 -- Purpose   : Load ACTIVE employees from the source table into EMPLOYEE_TARGET
 --             while guaranteeing EMPLOYEE_ID uniqueness in the target.
 --             Also loads employee skills into EMPLOYEE_SKILLS_TARGET,
---             populates a comma-separated SKILLS column, and derives GRADE.
+--             populates a comma-separated SKILLS column, derives GRADE,
+--             and computes DESIGNATION_WITH_GRADE.
 --
 -- Acceptance criteria implemented:
 --   * Only ACTIVE employees are loaded.
@@ -14,6 +15,7 @@
 --   * Employee skills for active employees are loaded into EMPLOYEE_SKILLS_TARGET.
 --   * SKILLS column in EMPLOYEE_TARGET is populated from EMPLOYEE_SKILLS.
 --   * GRADE is derived from SALARY (A/B/C/D).
+--   * DESIGNATION_WITH_GRADE is derived from EMPLOYEE_DESIGNATION and GRADE.
 --   * The procedure returns 'SUCCESS' after successful completion.
 --
 -- Live schema columns (verified via INFORMATION_SCHEMA):
@@ -22,7 +24,8 @@
 --                     MANAGER_NAME, EMPLOYEE_DESIGNATION, UPDATED_TS
 --   EMPLOYEE_TARGET : EMPLOYEE_ID, EMPLOYEE_NAME, DEPARTMENT,
 --                     EMPLOYEE_STATUS, SALARY, MANAGER_ID,
---                     MANAGER_NAME, EMPLOYEE_DESIGNATION, SKILLS, GRADE, LOAD_TS
+--                     MANAGER_NAME, EMPLOYEE_DESIGNATION, SKILLS,
+--                     GRADE, DESIGNATION_WITH_GRADE, LOAD_TS
 --   EMPLOYEE_SKILLS : EMP_ID, ENAME, SKILL_ID, SKILL_NAME
 --   EMPLOYEE_SKILLS_TARGET : EMP_ID, ENAME, SKILL_ID, SKILL_NAME, LOAD_TS
 -- ============================================================================
@@ -38,80 +41,33 @@ BEGIN
     MERGE INTO MULTI_AGENT_SDLC_POC.DEV.EMPLOYEE_TARGET AS tgt
     USING (
         SELECT
-            src.EMPLOYEE_ID,
-            src.EMPLOYEE_NAME,
-            src.DEPARTMENT,
-            src.EMPLOYEE_STATUS,
-            src.SALARY,
-            src.MANAGER_ID,
-            src.MANAGER_NAME,
-            src.EMPLOYEE_DESIGNATION
+            src.EMPLOYEE_ID, src.EMPLOYEE_NAME, src.DEPARTMENT, src.EMPLOYEE_STATUS,
+            src.SALARY, src.MANAGER_ID, src.MANAGER_NAME, src.EMPLOYEE_DESIGNATION
         FROM MULTI_AGENT_SDLC_POC.DEV.EMPLOYEE_SOURCE AS src
         WHERE UPPER(TRIM(src.EMPLOYEE_STATUS)) = 'ACTIVE'
         QUALIFY ROW_NUMBER() OVER (
-                    PARTITION BY src.EMPLOYEE_ID
-                    ORDER BY src.UPDATED_TS DESC NULLS LAST, src.EMPLOYEE_ID
-                ) = 1
+            PARTITION BY src.EMPLOYEE_ID ORDER BY src.UPDATED_TS DESC NULLS LAST, src.EMPLOYEE_ID
+        ) = 1
     ) AS s
     ON tgt.EMPLOYEE_ID = s.EMPLOYEE_ID
     WHEN NOT MATCHED THEN
-        INSERT (
-            EMPLOYEE_ID,
-            EMPLOYEE_NAME,
-            DEPARTMENT,
-            EMPLOYEE_STATUS,
-            SALARY,
-            MANAGER_ID,
-            MANAGER_NAME,
-            EMPLOYEE_DESIGNATION,
-            LOAD_TS
-        )
-        VALUES (
-            s.EMPLOYEE_ID,
-            s.EMPLOYEE_NAME,
-            s.DEPARTMENT,
-            s.EMPLOYEE_STATUS,
-            s.SALARY,
-            s.MANAGER_ID,
-            s.MANAGER_NAME,
-            s.EMPLOYEE_DESIGNATION,
-            CURRENT_TIMESTAMP()
-        );
+        INSERT (EMPLOYEE_ID, EMPLOYEE_NAME, DEPARTMENT, EMPLOYEE_STATUS,
+                SALARY, MANAGER_ID, MANAGER_NAME, EMPLOYEE_DESIGNATION, LOAD_TS)
+        VALUES (s.EMPLOYEE_ID, s.EMPLOYEE_NAME, s.DEPARTMENT, s.EMPLOYEE_STATUS,
+                s.SALARY, s.MANAGER_ID, s.MANAGER_NAME, s.EMPLOYEE_DESIGNATION, CURRENT_TIMESTAMP());
 
     -- Step 2: Load employee skills into EMPLOYEE_SKILLS_TARGET
     MERGE INTO MULTI_AGENT_SDLC_POC.DEV.EMPLOYEE_SKILLS_TARGET AS tgt
     USING (
-        SELECT
-            sk.EMP_ID,
-            sk.ENAME,
-            sk.SKILL_ID,
-            sk.SKILL_NAME
+        SELECT sk.EMP_ID, sk.ENAME, sk.SKILL_ID, sk.SKILL_NAME
         FROM MULTI_AGENT_SDLC_POC.DEV.EMPLOYEE_SKILLS AS sk
-        WHERE sk.EMP_ID IN (
-            SELECT EMPLOYEE_ID
-            FROM MULTI_AGENT_SDLC_POC.DEV.EMPLOYEE_TARGET
-        )
-        QUALIFY ROW_NUMBER() OVER (
-                    PARTITION BY sk.EMP_ID, sk.SKILL_ID
-                    ORDER BY sk.EMP_ID
-                ) = 1
+        WHERE sk.EMP_ID IN (SELECT EMPLOYEE_ID FROM MULTI_AGENT_SDLC_POC.DEV.EMPLOYEE_TARGET)
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY sk.EMP_ID, sk.SKILL_ID ORDER BY sk.EMP_ID) = 1
     ) AS s
     ON tgt.EMP_ID = s.EMP_ID AND tgt.SKILL_ID = s.SKILL_ID
     WHEN NOT MATCHED THEN
-        INSERT (
-            EMP_ID,
-            ENAME,
-            SKILL_ID,
-            SKILL_NAME,
-            LOAD_TS
-        )
-        VALUES (
-            s.EMP_ID,
-            s.ENAME,
-            s.SKILL_ID,
-            s.SKILL_NAME,
-            CURRENT_TIMESTAMP()
-        );
+        INSERT (EMP_ID, ENAME, SKILL_ID, SKILL_NAME, LOAD_TS)
+        VALUES (s.EMP_ID, s.ENAME, s.SKILL_ID, s.SKILL_NAME, CURRENT_TIMESTAMP());
 
     -- Step 3: Populate SKILLS column in EMPLOYEE_TARGET from EMPLOYEE_SKILLS
     MERGE INTO MULTI_AGENT_SDLC_POC.DEV.EMPLOYEE_TARGET AS tgt
@@ -125,8 +81,7 @@ BEGIN
     ON tgt.EMPLOYEE_ID = s.EMP_ID
     WHEN MATCHED THEN UPDATE SET tgt.SKILLS = s.SKILLS;
 
-    -- Step 4: Derive GRADE in EMPLOYEE_TARGET based on SALARY
-    --   A = 100,000+  |  B = 80,000-99,999  |  C = 60,000-79,999  |  D = below 60,000
+    -- Step 4: Derive GRADE based on SALARY
     UPDATE MULTI_AGENT_SDLC_POC.DEV.EMPLOYEE_TARGET
     SET GRADE = CASE
         WHEN SALARY >= 100000 THEN 'A'
@@ -134,6 +89,10 @@ BEGIN
         WHEN SALARY >= 60000  THEN 'C'
         ELSE 'D'
     END;
+
+    -- Step 5: Derive DESIGNATION_WITH_GRADE from EMPLOYEE_DESIGNATION and GRADE
+    UPDATE MULTI_AGENT_SDLC_POC.DEV.EMPLOYEE_TARGET
+    SET DESIGNATION_WITH_GRADE = COALESCE(EMPLOYEE_DESIGNATION, 'Unassigned') || ' - Grade ' || GRADE;
 
     RETURN 'SUCCESS';
 END;
